@@ -1,122 +1,274 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import AuthForm from "../components/AuthForm";
+import Dashboard from "../components/Dashboard";
+import Landing from "../components/Landing";
+import Notice from "../components/Notice";
+import PasswordResetForm from "../components/PasswordResetForm";
+import { getSupabaseBrowserClient } from "../lib/supabase";
+
+// Shared by the initial load and any on-demand refresh (e.g. after an admin
+// adds or edits a member) so both pull data the same way.
+async function loadDashboardData(supabase, userId) {
+  const [profileResult, stokvelResult, membersResult, constitutionResult, ledgerResult, contributionsResult, payoutsResult, announcementsResult, reconciliationsResult] = await Promise.all([
+    supabase.from("profiles").select("id, full_name, email, phone, role").eq("id", userId).single(),
+    supabase.from("stokvel").select("id, name, status, member_count, created_at").order("created_at", { ascending: false }),
+    supabase.from("members").select("id, full_name, role, standing, joined_at, stokvel_id").order("joined_at", { ascending: false }),
+    supabase.from("constitutions").select("id, version, club_type, contribution_amount, frequency, grace_period_days, quorum_percentage, effective_from, stokvel_id").order("version", { ascending: false }).limit(1),
+    supabase.from("ledger_entries").select("id, entry_type, description, amount, resulting_balance, created_at, stokvel_id").order("created_at", { ascending: false }),
+    supabase.from("contributions").select("id, amount, amount_paid, status, due_date, paid_at, member_id, stokvel_id").order("due_date", { ascending: false }),
+    supabase.from("payouts").select("id, amount, status, scheduled_for, member_id, stokvel_id, initiated_by, approved_by, created_at").order("created_at", { ascending: false }),
+    supabase.from("announcements").select("id, title, body, category, audience, channels, status, published_at, created_at, stokvel_id").order("created_at", { ascending: false }),
+    supabase.from("reconciliations").select("id, ledger_balance, bank_balance, difference, notes, created_at, stokvel_id").order("created_at", { ascending: false }),
+  ]);
+
+  if (profileResult.error || stokvelResult.error) {
+    return { error: profileResult.error?.message || stokvelResult.error?.message };
+  }
+
+  return {
+    profile: profileResult.data,
+    clubs: stokvelResult.data ?? [],
+    dashboardData: {
+      members: membersResult.data ?? [],
+      constitution: constitutionResult.data?.[0] ?? null,
+      ledger: ledgerResult.data ?? [],
+      contributions: contributionsResult.data ?? [],
+      payouts: payoutsResult.data ?? [],
+      announcements: announcementsResult.data ?? [],
+      reconciliations: reconciliationsResult.data ?? [],
+    },
+  };
+}
+
 export default function Home() {
-  return (
-    <main className="min-h-screen bg-slate-950 text-white overflow-hidden">
-      {/* Background */}
-      <div className="absolute inset-0">
-        <div className="absolute top-0 left-1/2 h-125 w-125 -translate-x-1/2 rounded-full bg-blue-600/20 blur-3xl" />
-        <div className="absolute bottom-0 right-0 h-87.5 w-87.5 rounded-full bg-cyan-500/10 blur-3xl" />
-      </div>
+  const [clientState] = useState(() => {
+    try {
+      return { client: getSupabaseBrowserClient(), error: "" };
+    } catch (error) {
+      return { client: null, error: error.message };
+    }
+  });
+  const supabase = clientState.client;
+  const [session, setSession] = useState(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [recoveringPassword, setRecoveringPassword] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [clubs, setClubs] = useState([]);
+  const [dashboardData, setDashboardData] = useState({ members: [], constitution: null, ledger: [], contributions: [], payouts: [], announcements: [], reconciliations: [] });
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+  const [joinableClubs, setJoinableClubs] = useState([]);
+  const configError = clientState.error;
 
-      {/* Navigation */}
-      <nav className="relative z-10 mx-auto flex max-w-7xl items-center justify-between px-6 py-6">
-        <h1 className="text-xl font-bold tracking-wide">
-          SAS
-        </h1>
+  // The sign-up form needs to offer a club to join before the visitor has a
+  // session, so this runs independently of auth state.
+  useEffect(() => {
+    if (!supabase) return;
+    let mounted = true;
 
-        <button className="rounded-xl border border-slate-700 bg-slate-900/60 px-5 py-2 text-sm transition hover:border-blue-500 hover:bg-slate-800">
-          Sign In
-        </button>
-      </nav>
+    supabase
+      .from("stokvel")
+      .select("id, name")
+      .eq("status", "active")
+      .order("name")
+      .then(({ data, error }) => {
+        if (mounted && !error) setJoinableClubs(data ?? []);
+      });
 
-      {/* Hero */}
-      <section className="relative z-10 mx-auto flex min-h-[75vh] max-w-7xl flex-col items-center justify-center px-6 text-center">
+    return () => {
+      mounted = false;
+    };
+  }, [supabase]);
 
-        <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-1 text-sm text-blue-300 backdrop-blur">
-          Honours Project
-        </span>
+  useEffect(() => {
+    let mounted = true;
+    if (!supabase) {
+      return () => {
+        mounted = false;
+      };
+    }
 
-        <h2 className="mt-8 max-w-5xl text-4xl font-extrabold leading-tight md:text-7xl">
-          Stokvel
-          <span className="bg-linear-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
-            {" "}
-            Administration System
-          </span>
-        </h2>
+    supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
+      if (mounted) {
+        setSession(currentSession);
+        setLoading(false);
+      }
+    });
 
-        <p className="mt-8 max-w-3xl text-lg leading-8 text-slate-300 md:text-xl">
-          Manages tenancy of clubs on the platform, creates and suspends clubs,
-          monitors platform health, and produces anonymised aggregate reports.
-          The system is intentionally designed without access to club level
-          financial data, ensuring strong separation of administrative and
-          financial responsibilities.
-        </p>
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (mounted) {
+        if (event === "PASSWORD_RECOVERY") {
+          setRecoveringPassword(true);
+        }
+        setSession(nextSession);
+        setLoading(false);
+      }
+    });
 
-        <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
-          <button className="rounded-xl bg-blue-600 px-8 py-4 font-medium transition hover:bg-blue-500">
-            Start Coding
-          </button>
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, [supabase]);
 
-          <button className="rounded-xl border border-slate-700 px-8 py-4 transition hover:border-blue-500 hover:bg-slate-900">
-            Learn More
-          </button>
-        </div>
-      </section>
+  useEffect(() => {
+    if (!supabase || !session) {
+      return;
+    }
 
-      {/* Features */}
-      <section className="relative z-10 mx-auto max-w-7xl px-6 pb-24">
-        <div className="grid gap-6 md:grid-cols-3">
+    let mounted = true;
 
-          <div className="rounded-3xl border border-slate-800 bg-white/5 p-8 backdrop-blur">
-            <div className="mb-5 flex m-auto h-14 w-14 items-center justify-center rounded-2xl bg-blue-600/20">
-              🏛️
-            </div>
+    loadDashboardData(supabase, session.user.id).then((result) => {
+      if (!mounted) return;
+      if (result.error) {
+        setMessage(result.error);
+      } else {
+        setMessage("");
+        setProfile(result.profile);
+        setClubs(result.clubs);
+        setDashboardData(result.dashboardData);
+      }
+      setLoading(false);
+    });
 
-            <h3 className="text-xl font-semibold">
-              Club Administration
-            </h3>
+    return () => {
+      mounted = false;
+    };
+  }, [session, supabase]);
 
-            <p className="mt-3 text-slate-400">
-              Create, activate, suspend and manage tenancy of stokvel clubs
-              across the platform from one secure administrative interface.
-            </p>
-          </div>
+  // Re-fetches everything after a mutation (e.g. an admin adding or editing a
+  // member) so the UI reflects what's actually in the database.
+  const refreshDashboardData = useCallback(async () => {
+    if (!supabase || !session) return;
+    const result = await loadDashboardData(supabase, session.user.id);
+    if (result.error) {
+      setMessage(result.error);
+      return;
+    }
+    setMessage("");
+    setProfile(result.profile);
+    setClubs(result.clubs);
+    setDashboardData(result.dashboardData);
+  }, [supabase, session]);
 
-          <div className="rounded-3xl border border-slate-800 bg-white/5 p-8 backdrop-blur">
-            <div className="mb-5 flex m-auto h-14 w-14 items-center justify-center rounded-2xl bg-cyan-600/20">
-              📊
-            </div>
+  async function signIn(event) {
+    event.preventDefault();
+    setMessage("");
+    const formData = new FormData(event.currentTarget);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: formData.get("email"),
+      password: formData.get("password"),
+    });
+    if (error) setMessage(error.message);
+  }
 
-            <h3 className="text-xl font-semibold">
-              Platform Monitoring
-            </h3>
+  async function forgotPassword(event) {
+    event.preventDefault();
+    setMessage("");
+    const formData = new FormData(event.currentTarget);
+    const { error } = await supabase.auth.resetPasswordForEmail(formData.get("email"), {
+      redirectTo: window.location.origin,
+    });
+    setMessage(error ? error.message : "Check your email for a password reset link.");
+  }
 
-            <p className="mt-3 text-slate-400">
-              Monitor overall system availability, operational health and
-              administrative activities through a centralised dashboard.
-            </p>
-          </div>
+  async function updatePassword(event) {
+    event.preventDefault();
+    setMessage("");
+    const formData = new FormData(event.currentTarget);
+    const password = formData.get("password");
+    const confirmPassword = formData.get("confirmPassword");
 
-          <div className="rounded-3xl border border-slate-800 bg-white/5 p-8 backdrop-blur">
-            <div className="mb-5 flex m-auto h-14 w-14 items-center justify-center rounded-2xl bg-emerald-600/20">
-              🔒
-            </div>
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/.test(password)) {
+      setMessage("Password must be at least 8 characters and include uppercase, lowercase, number, and special character.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
 
-            <h3 className="text-xl font-semibold">
-              Privacy by Design
-            </h3>
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+    setRecoveringPassword(false);
+    setMessage("Password updated. You are now signed in.");
+  }
 
-            <p className="mt-3 text-slate-400">
-              Generates anonymised aggregate reports while preventing access to
-              individual club financial information, reinforcing governance and
-              data privacy.
-            </p>
-          </div>
+  async function signUp(event) {
+    event.preventDefault();
+    setMessage("");
+    const formData = new FormData(event.currentTarget);
+    const fullName = String(formData.get("fullName") ?? "").trim();
+    const phone = String(formData.get("phone") ?? "").trim();
+    const role = String(formData.get("role") ?? "");
+    const clubId = String(formData.get("clubId") ?? "").trim();
+    const password = formData.get("password");
+    const confirmPassword = formData.get("confirmPassword");
 
-        </div>
-      </section>
+    if (!/^[A-Za-z ]+$/.test(fullName)) {
+      setMessage("Full name can contain letters and spaces only.");
+      return;
+    }
+    if (!/^\d{10}$/.test(phone)) {
+      setMessage("Phone number must contain exactly 10 digits.");
+      return;
+    }
+    // Admins create/own clubs rather than joining one, so they don't pick a
+    // club at sign-up — every other role must, since a club has to exist
+    // for them to belong to in the first place.
+    if (role !== "admin" && !clubId) {
+      setMessage("Choose which club you belong to.");
+      return;
+    }
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/.test(password)) {
+      setMessage("Password must be at least 8 characters and include uppercase, lowercase, number, and special character.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
 
-      {/* Footer */}
-      <footer className="relative z-10 border-t border-slate-800 py-8">
-        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-6 text-sm text-slate-500 md:flex-row">
-          <p>
-            Stokvel Administration System
-          </p>
+    const { error } = await supabase.auth.signUp({
+      email: formData.get("email"),
+      password,
+      options: {
+        data: {
+          full_name: fullName,
+          phone,
+          role,
+          club_id: clubId,
+        },
+      },
+    });
+    setMessage(error ? error.message : "Check your email to confirm your account.");
+  }
 
-          <p>
-            Honours Software Engineering Project
-          </p>
-        </div>
-      </footer>
-    </main>
-  );
+  async function signOut() {
+    await supabase.auth.signOut();
+  }
+
+  if (configError) {
+    return <Notice title="Connect Supabase" message={configError} />;
+  }
+  if (loading) {
+    return <Notice title="Loading" message="Checking your Supabase session..." />;
+  }
+  if (recoveringPassword) {
+    return <PasswordResetForm onSubmit={updatePassword} message={message} />;
+  }
+  if (!session) {
+    return authOpen ? (
+      <AuthForm onSignIn={signIn} onSignUp={signUp} onForgotPassword={forgotPassword} onBack={() => setAuthOpen(false)} message={message} clubs={joinableClubs} />
+    ) : (
+      <Landing onGetStarted={() => setAuthOpen(true)} />
+    );
+  }
+
+  return <Dashboard profile={profile || { full_name: session.user.email, email: session.user.email, role: session.user.user_metadata?.role || "member" }} session={session} clubs={clubs} dashboardData={dashboardData} message={message} onSignOut={signOut} onRefreshData={refreshDashboardData} />;
 }
